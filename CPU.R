@@ -4,46 +4,78 @@ library(dplyr)
 library(stringr)
 library(ggplot2)
 library(tidyr)
+library(ggrepel)
+library(readxl)
+library(RCurl)
 
-#git
+
+
+# Получаем текущую дату
+current_date <- Sys.Date()
+
+# Генерируем список дат на последние 10 дней
+dates <- seq(from = current_date, by = "-1 day", length.out = 10)
+
+# Генерируем список ссылок на файлы в формате "дд.мм.гг"
+urls <- paste0("https://www.regard.ru/api/price/regard_priceList_new.", format(dates, "%d.%m.%y"), ".xlsx")
+
+# Проверяем, существует ли файл по каждой ссылке и выводим результат
+for (url in urls) {
+  if (url.exists(url)) {
+    cat("Файл доступен по URL: ", url, "\n")
+    # Вы можете скачать файл здесь, если хотите:
+    local_file <- tempfile(fileext = ".xlsx")
+    download.file(url, local_file, mode = "wb")
+    break  # Как только файл найден, останавливаем проверку
+  } else {
+    cat("Файл не найден по URL: ", url, "\n")
+  }
+}
+
+
+# читаем файл
+regard <- read_excel(local_file, skip = 19)
+
+
+# Удаляем лишние строки, оставляем процессоры
+regard <- regard %>%
+  select(6, 7) %>%
+  filter(str_detect(.[[1]], "Процессор (AMD|Intel)")) %>%
+  filter(!str_detect(.[[1]], "\\.{3,}")) %>%
+  filter(!str_detect(.[[1]], "Threadripper"))
+
+# Переименование колонок
+regard <- regard %>% 
+  rename(`CPU Model` = `Наименование`) %>% 
+  rename(`Price_rub` = `Цена, руб.`)
+
+
+
+# Удаляем указанные слова из столбца CPU Model
+regard$`CPU Model` <- regard$`CPU Model` %>%
+  str_replace_all("OEM", "") %>%
+  str_replace_all("Процессор ", "") %>%
+  str_replace_all(" BOX (без кулера)", "") %>%
+  str_replace_all(" BOX", "") %>%
+  str_replace_all(" (без кулера)", "") %>%
+  str_replace_all("(без кулера)", "") %>%
+  str_replace_all("\\(\\)", "")  # Убираем пустые скобки
+
+regard$`CPU Model` <- trimws(regard$`CPU Model`)
+
+# Заменяем все " - " на "-" в колонке 'CPU Model'
+regard$`CPU Model` <- gsub(" - ", "-", regard$`CPU Model`)
+
+
+# Убираем дубликаты по столбцу 'CPU Model'
+regard <- regard %>% distinct(`CPU Model`, .keep_all = TRUE)
+
+
+
+
 # Указываем URL страницы
-url_p <- "https://www.tomshardware.com/news/lowest-cpu-prices"
+
 url_3d <- "https://benchmarks.ul.com/compare/best-cpus"
-
-# Загружаем HTML содержимое страницы
-page <- read_html(url_p)
-
-# Извлекаем все таблицы на странице
-tables <- page %>%
-  html_nodes("table") %>%
-  html_table(fill = TRUE)
-
-# Теперь нужно очистить и объединить таблицы
-
-# Применим очистку для всех таблиц (каждая таблица должна содержать 3 столбца)
-cleaned_tables <- lapply(tables, function(tbl) {
-  tbl %>%
-    # Убираем лишние строки и столбцы
-    filter(!is.na(`CPU Model`)) %>%
-    select(`CPU Model`, `Best US Price`, `Lowest-Ever US Price`) %>%
-    # Преобразуем в более удобный формат
-    mutate(
-      `Best US Price` = gsub("\\$|,", "", `Best US Price`), # Убираем символы доллара и запятые
-      `Best US Price` = as.numeric(`Best US Price`), # Преобразуем в числовой формат
-      `Lowest-Ever US Price` = gsub("\\$|,", "", `Lowest-Ever US Price`),
-      `Lowest-Ever US Price` = as.numeric(`Lowest-Ever US Price`) # Преобразуем в числовой формат
-    ) %>%
-    rename(`Price` = `Best US Price`)  # Переименовываем столбец
-})
-
-# Объединяем все таблицы в одну
-price_cpu <- bind_rows(cleaned_tables)
-
-# Сохраняем итоговую таблицу в файл (например, CSV)
-write.csv(price_cpu, "cpu_prices.csv", row.names = FALSE)
-
-
-
 
 
 # Чтение HTML-страницы
@@ -89,15 +121,6 @@ clean_table_cpu <- clean_table_cpu %>%
 clean_table_cpu <- clean_table_cpu %>%
   mutate(`CPU Model` = str_replace_all(`CPU Model`, "\\?", ""))
 
-# Обновление цены
-clean_table_cpu <- clean_table_cpu %>%
-  mutate(
-    `Price` = ifelse(
-      !is.na(price_cpu$`Price`[match(`CPU Model`, price_cpu$`CPU Model`)]),  
-      price_cpu$`Price`[match(`CPU Model`, price_cpu$`CPU Model`)],  
-      `Price`  
-    )
-  )
 
 clean_table_cpu <- clean_table_cpu %>%
   filter(!str_detect(`CPU Model`, "Threadripper"))
@@ -106,16 +129,22 @@ clean_table_cpu <- clean_table_cpu %>%
 clean_table_cpu <- clean_table_cpu %>%
   select(-c("Rank", "16 threads", "8 threads", "4 threads", "2 threads", "Single thread"))
 
+
 colnames(clean_table_cpu)
+
+# добавлене цены
+clean_table_cpu <- left_join(clean_table_cpu, regard[, c("CPU Model", "Price_rub")], by = "CPU Model")
+
 
 
 #Фультруем только те где есть цена
-clean_table_cpu <- clean_table_cpu %>% filter(!is.na(`Price`)) 
+clean_table_cpu <- clean_table_cpu %>% filter(!is.na(`Price_rub`)) 
 
 
-#Убираем все NA
-clean_table_cpu <- clean_table_cpu %>%
-  mutate_all(~replace(., is.na(.), 0))
+clean_table_cpu$VFM <- round(clean_table_cpu$`3DMark CPU` / clean_table_cpu$Price_rub *100)
+
+clean_table_cpu$Price_rub2 <- clean_table_cpu$Price_rub / 1000
+
 
 
 # Добавляем новый столбец "CPU Brand"
@@ -123,20 +152,6 @@ clean_table_cpu$`CPU Brand` <- ifelse(grepl("AMD", clean_table_cpu$`CPU Model`),
                                       ifelse(grepl("Intel", clean_table_cpu$`CPU Model`), "Intel", NA))
 
 
-# диаппазоны цен
-clean_table_cpu <- clean_table_cpu %>%
-  mutate(range = case_when(
-    Price  < 200 ~ "100-200",
-    Price >= 200 & Price < 300 ~ "200-300",
-    Price >= 300 & Price < 400 ~ "300-400",
-    Price >= 400 & Price < 500 ~ "400-500",
-    Price >= 500 & Price < 600 ~ "500-600",
-    Price >= 600 & Price < 700 ~ "600-700",
-    Price >= 700 & Price < 800 ~ "700-800",
-    Price >= 800 & Price < 900 ~ "800-900",
-    Price >= 900 & Price < 2000 ~ "900-1000",
-    TRUE ~ NA_character_  # для случаев с NA или отсутствием цены
-  ))
 
 
 all_data <- clean_table_cpu
@@ -149,12 +164,12 @@ ui <- fluidPage(
   sidebarLayout(
     sidebarPanel(
       sliderInput("priceRange", 
-                  "Select Price Range (USD):", 
+                  "Select Price Range (Rub):", 
                   min = 0,  # Минимальная цена
-                  max = round(max(all_data$Price), -2),  # Максимальная цена из данных
-                  value = c(100, 500),  # Диапазон по умолчанию от 100 до 500
-                  step = 50,  # Шаг слайдера
-                  pre = "$", 
+                  max = round(max(all_data$Price_rub2), -1),  # Максимальная цена из данных
+                  value = c(10, 30),  
+                  step = 10,  # Шаг слайдера
+                  post = "k", 
                   sep = ",", 
                   animate = TRUE),
       helpText("Choose a price range to filter the CPUs.")
@@ -174,7 +189,7 @@ server <- function(input, output) {
   filtered_data <- reactive({
     data <- all_data  # Все данные из датафрейма
     data %>%
-      filter(Price >= input$priceRange[1], Price <= input$priceRange[2])  # Фильтруем процессоры по диапазону цен
+      filter(Price_rub2 >= input$priceRange[1], Price_rub2 <= input$priceRange[2])  # Фильтруем процессоры по диапазону цен
   })
   
   # Обрабатываем и находим выделенные точки
@@ -197,7 +212,7 @@ server <- function(input, output) {
     
     # Находим процессор с наилучшей ценой за производительность
     Value_for_Money <- data %>%
-      arrange(desc(`Value for Money`)) %>%
+      arrange(desc(`VFM`)) %>%
       slice(1) %>%
       mutate(type = "Value for Money")
     
@@ -213,13 +228,24 @@ server <- function(input, output) {
     return(points)
   })
   
-  # Отображаем график с выделенными точками
+  
+  
   output$cpu_plot <- renderPlot({
     data <- filtered_data()  # Получаем отфильтрованные данные
     points <- highlighted_points()  # Получаем выделенные точки
     
+    # Находим максимальное и минимальное значение для оси Y
+    min_y <- min(data$Price_rub2, na.rm = TRUE)
+    max_y <- max(data$Price_rub2, na.rm = TRUE)
+    
+    # Устанавливаем нижнюю границу на 5 меньше минимального значения
+    y_limit_lower <- min_y - 5
+    
+    # Устанавливаем верхнюю границу на 5 больше максимального значения
+    y_limit_upper <- max_y + 5
+    
     # Строим график
-    ggplot(data, aes(x = `3DMark CPU`, y = `Price`)) +
+    ggplot(data, aes(x = `3DMark CPU`, y = `Price_rub2`)) +
       geom_point(aes(color = "Other"), size = 1) +  # Все точки (будет отображаться, но не попадет в легенду)
       geom_point(data = points, aes(color = type), size = 5) +  # Выделяем 4 точки, используя переменную type
       scale_color_manual(
@@ -227,19 +253,33 @@ server <- function(input, output) {
                    "Value for Money" = "green", "Popularity" = "orange", 
                    "Other" = "grey"),
         limits = c("Intel", "AMD", "Value for Money", "Popularity"),  # Ограничиваем легенду только нужными категориями
-        labels = c("Intel CPUs", "AMD CPUs", "Best Value for Money", "Most Popular CPU")  # Изменяем подписи для легенды
+        labels = c("Intel CPUs", "AMD CPUs", "Value for Money", "Popular CPU")  # Изменяем подписи для легенды
       ) + 
-      geom_text(data = points, aes(label = `CPU Model`), vjust = -1, hjust = 1) +  # Подписи для выделенных точек
-      labs(title = "3DMark CPU vs MSRP Price", x = "3DMark CPU", y = "Price", color = "CPU Type") +  # Легенда
+      # Используем ggrepel для автоматического сдвига подписей
+      geom_text_repel(data = points, aes(label = `CPU Model`), size = 4, box.padding = 0.4) +  # Подписи для выделенных точек
+      labs(title = "3DMark CPU vs Price", x = "3DMark CPU", y = "Price", color = "") +  # Легенда
       theme_minimal() +
-      theme(legend.position = "top")  # Это настройка может помочь в улучшении отображения легенды
+      theme(
+        legend.position = "top",  # Позиция легенды
+        legend.text = element_text(size = 13),  # Увеличиваем размер текста в легенде
+        legend.title = element_text(size = 14)  # Увеличиваем размер заголовка легенды (если нужен)
+      ) + 
+      scale_y_continuous(
+        limits = c(y_limit_lower, y_limit_upper),  # Устанавливаем динамические пределы оси Y
+        expand = c(0, 0)  # Убираем отступы с обеих сторон оси Y
+      )  # Ограничиваем ось Y и добавляем отступы
   })
   
-  # Отображаем таблицу с выделенными точками
+  
+  
+  
+  
   output$highlighted_points <- renderTable({
-    highlighted_points() %>%  # Получаем выделенные точки
-      select(`CPU Model`, `Price`, `3DMark CPU`, type)  # Выбираем нужные столбцы
+    highlighted_points() %>%
+      mutate(Price_rub = format(Price_rub, big.mark = " ", scientific = FALSE)) %>%  # Добавляем разделитель тысяч
+      select(`CPU Model`, `Price_rub`, `3DMark CPU`, type)  # Выбираем нужные столбцы
   })
+  
 }
 
 # Запуск приложения
